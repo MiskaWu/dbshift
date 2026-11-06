@@ -6,6 +6,7 @@ import (
 	"github.com/miskawu/dbshift/internal/config"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 var (
@@ -26,17 +27,20 @@ func Execute() {
 }
 
 func init() {
-	pf := rootCmd.PersistentFlags()
+	addFlags(rootCmd.PersistentFlags())
+	rootCmd.AddCommand(migrateCmd, verifyCmd)
+}
 
+func addFlags(pf *pflag.FlagSet) {
 	pf.StringVar(&cfg.MySQL.Host, "mysql-host", config.EnvOr("MYSQL_HOST", "127.0.0.1"), "MySQL host")
 	pf.IntVar(&cfg.MySQL.Port, "mysql-port", config.EnvOrInt("MYSQL_PORT", 3306), "MySQL port")
 	pf.StringVar(&cfg.MySQL.User, "mysql-user", config.EnvOr("MYSQL_USER", "root"), "MySQL user")
-	pf.StringVar(&cfg.MySQL.Pass, "mysql-pass", config.EnvOr("MYSQL_PASS", ""), "MySQL password")
+	pf.StringVar(&cfg.MySQL.Pass, "mysql-pass", config.EnvOr("MYSQL_PASS", ""), "MySQL password (prefer the MYSQL_PASS environment variable: flags are visible in ps)")
 
 	pf.StringVar(&cfg.PG.Host, "pg-host", config.EnvOr("PG_HOST", "127.0.0.1"), "PostgreSQL host")
 	pf.IntVar(&cfg.PG.Port, "pg-port", config.EnvOrInt("PG_PORT", 5432), "PostgreSQL port")
 	pf.StringVar(&cfg.PG.User, "pg-user", config.EnvOr("PG_USER", "postgres"), "PostgreSQL user")
-	pf.StringVar(&cfg.PG.Pass, "pg-pass", config.EnvOr("PG_PASS", ""), "PostgreSQL password")
+	pf.StringVar(&cfg.PG.Pass, "pg-pass", config.EnvOr("PG_PASS", ""), "PostgreSQL password (prefer the PG_PASS environment variable: flags are visible in ps)")
 	pf.StringVar(&cfg.PG.SSLMode, "pg-ssl", config.EnvOr("PG_SSLMODE", "disable"), "PostgreSQL SSL mode (disable, require, verify-ca, verify-full)")
 
 	pf.StringSliceVar(&cfg.Databases, "databases", nil, "Databases to migrate (comma-separated, required)")
@@ -46,5 +50,8 @@ func init() {
 	pf.BoolVar(&cfg.SkipDiagnosis, "skip-diagnosis", false, "Skip per-column/per-row diagnosis on mismatch")
 	pf.StringVar(&logLevel, "log-level", "info", "Log level (debug, info, warn, error)")
 
-	rootCmd.AddCommand(migrateCmd, verifyCmd)
+	// A password from the environment must not show up as the flag's default:
+	// cobra prints defaults in --help and in the usage text after any error.
+	pf.Lookup("mysql-pass").DefValue = ""
+	pf.Lookup("pg-pass").DefValue = ""
 }
