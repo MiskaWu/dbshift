@@ -2,6 +2,25 @@ package migrator
 
 import "testing"
 
+func TestTruncateSQL(t *testing.T) {
+	tests := []struct {
+		name   string
+		tables []string
+		want   string
+	}{
+		{"single table", []string{"users"}, `TRUNCATE TABLE "users"`},
+		{"all tables in one statement", []string{"a_child", "z_parent"}, `TRUNCATE TABLE "a_child", "z_parent"`},
+		{"quotes identifiers", []string{`we"ird`}, `TRUNCATE TABLE "we""ird"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := truncateSQL(tt.tables); got != tt.want {
+				t.Errorf("truncateSQL() = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestFilterColumns(t *testing.T) {
 	tests := []struct {
 		name            string

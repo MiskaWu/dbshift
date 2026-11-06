@@ -8,9 +8,10 @@ MySQL 到 PostgreSQL 的資料遷移工具。支援多資料庫批次遷移、�
 - **並行表遷移**：可設定 worker 數量，同時遷移多張表
 - **批次 COPY**：使用 PostgreSQL COPY 協定高效寫入
 - **型別轉換**：自動處理 MySQL 與 PostgreSQL 之間的型別差異（BLOB、BIT、JSON、DECIMAL、TINYINT→boolean、TIME→time 等）
+- **一次清空目標表**：worker 開始前用一條 TRUNCATE 清空所有目標表，不用 CASCADE，較晚遷移的父表不會清掉已寫好的子表
 - **Trigger 管理**：遷移期間自動停用/啟用外鍵與觸發器
 - **欄位自動跳過**：來源存在但目標已移除的廢棄欄位會自動跳過並記錄警告，不中斷遷移
-- **交易原子性**：每張表的 TRUNCATE、COPY、序列重設在同一筆交易中完成，避免並行 worker 互相干擾
+- **交易原子性**：每張表的 COPY、序列重設在同一筆交易中完成
 - **Sequence 重設**：遷移後自動修正 PostgreSQL 序列值
 - **資料驗證**：比對行數、數值 SUM、文字長度 SUM、日期範圍（MIN/MAX）checksum，確保資料完整性
 - **差異診斷**：Checksum 不符時自動 drill-down，顯示不符的欄位與實際差異資料列（可用 `--diagnose-limit` 控制顯示筆數）
@@ -21,6 +22,8 @@ MySQL 到 PostgreSQL 的資料遷移工具。支援多資料庫批次遷移、�
 
 - MySQL 中的資料庫與表結構須已在 PostgreSQL 中建立（本工具僅遷移資料，不遷移 schema）
 - 僅遷移兩端都存在的表（來源有但目標沒有的欄位會自動跳過並發出警告）
+- 目標端若有遷移範圍以外的表用外鍵參照被遷移的表，遷移會在清空前報錯停止，資料不會變動
+- 遷移會先清空所有目標表；中途失敗時目標可能只有部分資料，重跑一次即可
 
 ## 安裝
 
@@ -64,11 +67,16 @@ dbshift migrate --databases app:app_stage \
 
 ### 完整範例
 
+密碼走環境變數。寫在 `--mysql-pass`、`--pg-pass` 的話，同一台機器上用 `ps` 就看得到。
+
 ```bash
+read -rs MYSQL_PASS && export MYSQL_PASS
+read -rs PG_PASS && export PG_PASS
+
 dbshift migrate \
   --databases mydb,mydb_log \
-  --mysql-host 10.0.0.1 --mysql-port 3306 --mysql-user root --mysql-pass secret \
-  --pg-host 10.0.0.2 --pg-port 5432 --pg-user postgres --pg-pass secret \
+  --mysql-host 10.0.0.1 --mysql-port 3306 --mysql-user root \
+  --pg-host 10.0.0.2 --pg-port 5432 --pg-user postgres \
   --pg-ssl require \
   --batch 5000 \
   --workers 8 \
@@ -106,12 +114,13 @@ dbshift migrate \
 
 1. 連線至 MySQL 與 PostgreSQL
 2. 列出 MySQL 中的表，篩選出 PostgreSQL 中也存在的表
-3. 對每張表（並行處理）：
+3. 用一條 TRUNCATE 清空所有目標表
+4. 對每張表（並行處理）：
    - 停用 PostgreSQL 觸發器
    - 比對來源與目標欄位，跳過目標不存在的廢棄欄位（warn 記錄）
-   - 開始交易：清空目標表 → 串流讀取並批次 COPY → 重設序列值 → 提交
+   - 開始交易：串流讀取並批次 COPY → 重設序列值 → 提交
    - 啟用觸發器
-4. 執行驗證（並行）：比對行數、數值 SUM、文字長度 SUM、日期 MIN/MAX
+5. 執行驗證（並行）：比對行數、數值 SUM、文字長度 SUM、日期 MIN/MAX
 
 ## 驗證報告
 
@@ -146,7 +155,8 @@ Checksum 不符時會自動顯示不符的欄位及差異資料列。可用 `--s
 
 - **驗證要能說明「哪裡不一樣」**：只回報 checksum 不符等於叫人自己去翻資料。不符時自動往下鑽：先逐欄比 SUM 找出哪幾欄不一致，再以主鍵（沒有主鍵就用第一個 unique key）逐列比對，列出實際差異的資料列。
 - **checksum 本身也會出錯**：MySQL 的 `CAST(SUM(col) AS SIGNED)` 在總和超過 int64 時會截斷，大表上兩端資料明明一致卻報不符。改成 `CAST(... AS CHAR)` 以十進位字串比對，消除這類假陽性。
-- **一張表一筆交易**：TRUNCATE、COPY、序列重設包在同一筆交易裡，並行的 worker 不會看到彼此的半成品；序列先全部查完再逐一重設，避開 pgx 在交易中「上一個結果還沒讀完」的 `conn busy`。
+- **清空和寫入分開**：每個 worker 各自 `TRUNCATE ... CASCADE` 時，父表較晚遷移就會把已寫好的子表清空。改成開工前一次清空所有目標表，不用 CASCADE，外鍵也不會牽連遷移範圍以外的表
+- **一張表一筆交易**：COPY、序列重設包在同一筆交易裡，並行的 worker 不會看到彼此的半成品；序列先全部查完再逐一重設，避開 pgx 在交易中「上一個結果還沒讀完」的 `conn busy`。
 - **目標端的 schema 是準的**：來源有、目標已刪的廢棄欄位直接跳過並記警告，不讓一個歷史欄位擋下整次遷移。
 
 ## 授權

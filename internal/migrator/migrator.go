@@ -109,6 +109,13 @@ func (m *Migrator) migrateDatabase(ctx context.Context, mapping config.DatabaseM
 		"to_migrate", len(migrateTables),
 	)
 
+	// Empty every target table before any worker starts. Workers only COPY.
+	if len(migrateTables) > 0 {
+		if _, err := pgPool.Exec(ctx, truncateSQL(migrateTables)); err != nil {
+			return fmt.Errorf("truncate target tables (a table outside this migration may reference them): %w", err)
+		}
+	}
+
 	// Migrate concurrently with bounded workers
 	gCtx, gCancel := context.WithCancel(ctx)
 	defer gCancel()
@@ -203,18 +210,12 @@ func (m *Migrator) migrateTable(ctx context.Context, mysqlDB *sql.DB, pgPool *pg
 		filteredPGColTypes[i] = pgColTypeMap[colNames[idx]]
 	}
 
-	// Begin PG transaction: TRUNCATE + all COPY batches + reset sequences are atomic.
-	// This prevents TRUNCATE CASCADE from other concurrent workers from interfering.
+	// Begin PG transaction: all COPY batches + reset sequences are atomic.
 	tx, err := pgPool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback(context.Background())
-
-	// Truncate within transaction
-	if _, err := tx.Exec(ctx, "TRUNCATE TABLE "+sanitizedTable+" CASCADE"); err != nil {
-		return fmt.Errorf("truncate: %w", err)
-	}
 
 	// Batch and COPY within transaction
 	var totalRows int64
@@ -276,6 +277,20 @@ func (m *Migrator) migrateTable(ctx context.Context, mysqlDB *sql.DB, pgPool *pg
 
 	m.logger.Info("資料表遷移完成", "table", table, "rows", totalRows)
 	return nil
+}
+
+// truncateSQL empties all target tables in one statement. PostgreSQL accepts
+// that for tables tied by foreign keys as long as both sides are listed, so
+// CASCADE is not needed and must not come back: truncating per table with
+// CASCADE lets a parent migrated later wipe a child that was already written,
+// and it also wipes tables outside the migration. Without it, such a table
+// stops the run with an error before any data changes.
+func truncateSQL(tables []string) string {
+	quoted := make([]string, len(tables))
+	for i, t := range tables {
+		quoted[i] = pgx.Identifier{t}.Sanitize()
+	}
+	return "TRUNCATE TABLE " + strings.Join(quoted, ", ")
 }
 
 func listTables(ctx context.Context, db *sql.DB, dbName string) ([]string, error) {
