@@ -54,6 +54,13 @@ func (c DBConfig) MySQLDSN(database string) string {
 		c.User, c.Pass, c.Host, c.Port, database)
 }
 
+// MySQLUTCDSN is MySQLDSN with the session time zone fixed to UTC. loc=UTC only
+// tells the driver how to label what it reads; the server still renders
+// TIMESTAMP and evaluates UNIX_TIMESTAMP(DATETIME) in the session zone.
+func (c DBConfig) MySQLUTCDSN(database string) string {
+	return c.MySQLDSN(database) + "&time_zone=%27%2B00%3A00%27"
+}
+
 // PostgresDSN returns a pgx compatible connection string.
 func (c DBConfig) PostgresDSN(database string) string {
 	sslMode := c.SSLMode

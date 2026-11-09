@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestComparePerColumnChecksums(t *testing.T) {
@@ -297,4 +298,51 @@ func TestBuildPGPerColumnDateQuery(t *testing.T) {
 	if !strings.Contains(got, `EXTRACT(EPOCH FROM MAX("created_at"))`) {
 		t.Errorf("missing MAX epoch, got: %s", got)
 	}
+}
+
+func TestComparableValueScan(t *testing.T) {
+	taipei := time.FixedZone("UTC+8", 8*60*60)
+
+	tests := []struct {
+		name string
+		src  any
+		want string
+	}{
+		{"zone is converted, not dropped", time.Date(2024, 3, 9, 18, 20, 30, 0, taipei), "2024-03-09T10:20:30Z"},
+		{"zone can change the date", time.Date(2024, 3, 10, 1, 0, 0, 0, taipei), "2024-03-09T17:00:00Z"},
+		{"microseconds are kept", time.Date(2024, 3, 9, 10, 20, 30, 123456000, time.UTC), "2024-03-09T10:20:30.123456Z"},
+		{"trailing zeros are dropped", time.Date(2024, 3, 9, 10, 20, 30, 120000000, time.UTC), "2024-03-09T10:20:30.12Z"},
+		{"whole seconds have no fraction", time.Date(2024, 3, 9, 10, 20, 30, 0, time.UTC), "2024-03-09T10:20:30Z"},
+		{"true reads like TINYINT(1)", true, "1"},
+		{"false reads like TINYINT(1)", false, "0"},
+		{"bytes", []byte("abc"), "abc"},
+		{"string", "abc", "abc"},
+		{"int64", int64(-42), "-42"},
+		{"uint64 past int64", uint64(18446744073709551615), "18446744073709551615"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var v comparableValue
+			if err := v.Scan(tt.src); err != nil {
+				t.Fatalf("Scan: %v", err)
+			}
+			if v.text == nil || *v.text != tt.want {
+				t.Errorf("Scan(%v) = %s, want %s", tt.src, nullStr(v.text), tt.want)
+			}
+		})
+	}
+
+	t.Run("NULL stays NULL over an earlier value", func(t *testing.T) {
+		var v comparableValue
+		if err := v.Scan("old"); err != nil {
+			t.Fatalf("Scan: %v", err)
+		}
+		if err := v.Scan(nil); err != nil {
+			t.Fatalf("Scan: %v", err)
+		}
+		if v.text != nil {
+			t.Errorf("Scan(nil) = %q, want NULL", *v.text)
+		}
+	})
 }

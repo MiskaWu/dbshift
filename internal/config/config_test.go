@@ -36,6 +36,14 @@ func TestDBConfig_MySQLDSN(t *testing.T) {
 	}
 }
 
+func TestDBConfig_MySQLUTCDSN(t *testing.T) {
+	cfg := DBConfig{Host: "localhost", Port: 3306, User: "root", Pass: "secret"}
+	want := "root:secret@tcp(localhost:3306)/testdb?charset=utf8mb4&parseTime=true&loc=UTC&time_zone=%27%2B00%3A00%27"
+	if got := cfg.MySQLUTCDSN("testdb"); got != want {
+		t.Errorf("MySQLUTCDSN() = %q, want %q", got, want)
+	}
+}
+
 func TestDBConfig_PostgresDSN(t *testing.T) {
 	tests := []struct {
 		name     string

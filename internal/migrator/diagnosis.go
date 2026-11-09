@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -495,20 +496,11 @@ func fetchRows(ctx context.Context, db *sql.DB, table string, queryCols, pkCols 
 
 	result := make(map[string]rowData)
 	for rows.Next() {
-		dest := make([]*string, len(queryCols))
-		scanDest := make([]interface{}, len(queryCols))
-		for i := range dest {
-			scanDest[i] = &dest[i]
-		}
-		if err := rows.Scan(scanDest...); err != nil {
+		rd, err := scanComparableRow(rows.Scan, queryCols)
+		if err != nil {
 			return nil, err
 		}
-		rd := make(rowData, len(queryCols))
-		for i, col := range queryCols {
-			rd[col] = dest[i]
-		}
-		pkKey := buildPKKey(rd, pkCols)
-		result[pkKey] = rd
+		result[buildPKKey(rd, pkCols)] = rd
 	}
 	return result, rows.Err()
 }
@@ -534,22 +526,66 @@ func fetchPGRows(ctx context.Context, pool *pgxpool.Pool, table string, queryCol
 
 	result := make(map[string]rowData)
 	for rows.Next() {
-		dest := make([]*string, len(queryCols))
-		scanDest := make([]interface{}, len(queryCols))
-		for i := range dest {
-			scanDest[i] = &dest[i]
-		}
-		if err := rows.Scan(scanDest...); err != nil {
+		rd, err := scanComparableRow(rows.Scan, queryCols)
+		if err != nil {
 			return nil, err
 		}
-		rd := make(rowData, len(queryCols))
-		for i, col := range queryCols {
-			rd[col] = dest[i]
-		}
-		pkKey := buildPKKey(rd, pkCols)
-		result[pkKey] = rd
+		result[buildPKKey(rd, pkCols)] = rd
 	}
 	return result, rows.Err()
+}
+
+// comparableValue is how a cell reaches the row comparison, on both sides, so
+// two drivers cannot disagree on the format. It takes the plain values both
+// drivers offer a sql.Scanner, which pgx also does for types it cannot scan into
+// a string, such as dates and booleans.
+//
+// Times become UTC in RFC 3339 with trailing zeros dropped, so .120 and .12 are
+// the same value. Booleans become 1 and 0, which is how TINYINT(1) reads.
+type comparableValue struct {
+	text *string
+}
+
+func (v *comparableValue) Scan(src any) error {
+	var s string
+	switch x := src.(type) {
+	case nil:
+		v.text = nil
+		return nil
+	case time.Time:
+		s = x.UTC().Format(time.RFC3339Nano)
+	case bool:
+		s = "0"
+		if x {
+			s = "1"
+		}
+	case []byte:
+		s = string(x)
+	case string:
+		s = x
+	default:
+		s = fmt.Sprint(x)
+	}
+	v.text = &s
+	return nil
+}
+
+// scanComparableRow reads the current row through comparableValue. scan is
+// rows.Scan of either driver.
+func scanComparableRow(scan func(dest ...any) error, queryCols []string) (rowData, error) {
+	cells := make([]comparableValue, len(queryCols))
+	dest := make([]any, len(queryCols))
+	for i := range cells {
+		dest[i] = &cells[i]
+	}
+	if err := scan(dest...); err != nil {
+		return nil, err
+	}
+	rd := make(rowData, len(queryCols))
+	for i, col := range queryCols {
+		rd[col] = cells[i].text
+	}
+	return rd, nil
 }
 
 func buildPKKey(rd rowData, pkCols []string) string {
