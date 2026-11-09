@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // What each driver hands back for a date column, and what each server's time
@@ -77,6 +78,70 @@ func mismatchedColumns(d *DiagnosisResult) []string {
 	return cols
 }
 
+// setMySQLGlobalTimeZone moves the server off UTC for the rest of the test, so
+// every new connection starts in that zone unless the tool says otherwise.
+func setMySQLGlobalTimeZone(t *testing.T, env *fkEnv, zone string) {
+	t.Helper()
+	var previous string
+	if err := env.mysql.QueryRow("SELECT @@global.time_zone").Scan(&previous); err != nil {
+		t.Fatal(err)
+	}
+	mustExecSQL(t, env.mysql, "SET GLOBAL time_zone = '"+zone+"'")
+	t.Cleanup(func() {
+		if _, err := env.mysql.Exec("SET GLOBAL time_zone = '" + previous + "'"); err != nil {
+			t.Errorf("restore time_zone: %v", err)
+		}
+	})
+}
+
+// MySQL hands out TIMESTAMP in the session zone, so a session outside UTC would
+// move every value by the offset on its way to the target. DATETIME has no zone
+// and must arrive as written.
+func TestMigrateKeepsTimesOnServerOutsideUTC(t *testing.T) {
+	env := newFKEnv(t, 2)
+	setMySQLGlobalTimeZone(t, env, "+08:00")
+
+	mustExecSQL(t, env.mysql, `CREATE TABLE stamps (
+		id INT PRIMARY KEY,
+		to_tz TIMESTAMP(3) NULL,
+		to_plain TIMESTAMP(3) NULL,
+		wall DATETIME(3) NULL)`)
+	mustExecPG(t, env.pg, `CREATE TABLE stamps (
+		id INT PRIMARY KEY,
+		to_tz TIMESTAMPTZ(3),
+		to_plain TIMESTAMP(3),
+		wall TIMESTAMP(3))`)
+	// 1709949600.250 is 2024-03-09 02:00:00.25 UTC, in any session zone.
+	mustExecSQL(t, env.mysql, `INSERT INTO stamps VALUES
+		(1, FROM_UNIXTIME(1709949600.250), FROM_UNIXTIME(1709949600.250), '2024-03-09 02:00:00.250')`)
+
+	ctx := context.Background()
+	if err := env.migrator.migrateDatabase(ctx, env.mapping); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	var toTZ, toPlain, wall time.Time
+	if err := env.pg.QueryRow(ctx, "SELECT to_tz, to_plain, wall FROM stamps").Scan(&toTZ, &toPlain, &wall); err != nil {
+		t.Fatalf("read target: %v", err)
+	}
+	want := time.Date(2024, 3, 9, 2, 0, 0, 250_000_000, time.UTC)
+	for name, got := range map[string]time.Time{"to_tz": toTZ, "to_plain": toPlain, "wall": wall} {
+		if !got.Equal(want) {
+			t.Errorf("%s = %s, want %s", name, got.UTC().Format(time.RFC3339Nano), want.Format(time.RFC3339Nano))
+		}
+	}
+
+	result, err := env.migrator.verifyDatabase(ctx, env.mapping)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	for _, tr := range result.Tables {
+		if tr.Table == "stamps" && tr.Status != "OK" {
+			t.Errorf("stamps status = %s, want OK", tr.Status)
+		}
+	}
+}
+
 // A migrated table with every date column type. Only row 4 is changed on the
 // target, so any other row showing up means the two sides were formatted
 // differently: fractions like .120, NULLs and whole seconds are all in there.
@@ -131,17 +196,7 @@ func TestRowDiffsListDateColumns(t *testing.T) {
 // zone the untouched column is flagged and row 1 shows up as a false diff.
 func TestRowDiffsDoNotDependOnServerTimeZones(t *testing.T) {
 	env := newFKEnv(t, 2)
-
-	var previous string
-	if err := env.mysql.QueryRow("SELECT @@global.time_zone").Scan(&previous); err != nil {
-		t.Fatal(err)
-	}
-	mustExecSQL(t, env.mysql, "SET GLOBAL time_zone = '+08:00'")
-	t.Cleanup(func() {
-		if _, err := env.mysql.Exec("SET GLOBAL time_zone = '" + previous + "'"); err != nil {
-			t.Errorf("restore time_zone: %v", err)
-		}
-	})
+	setMySQLGlobalTimeZone(t, env, "+08:00")
 	mustExecPG(t, env.pg, "ALTER DATABASE "+fkTestDB+" SET timezone = 'America/New_York'")
 
 	mustExecSQL(t, env.mysql, `CREATE TABLE clock (

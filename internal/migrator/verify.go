@@ -49,7 +49,7 @@ func (m *Migrator) Verify(ctx context.Context) ([]VerifyResult, error) {
 func (m *Migrator) verifyDatabase(ctx context.Context, mapping config.DatabaseMapping) (VerifyResult, error) {
 	result := VerifyResult{Database: mapping.MySQL + "→" + mapping.PG}
 
-	mysqlDB, err := sql.Open("mysql", m.cfg.MySQL.MySQLUTCDSN(mapping.MySQL))
+	mysqlDB, err := sql.Open("mysql", m.cfg.MySQL.MySQLDSN(mapping.MySQL))
 	if err != nil {
 		return result, fmt.Errorf("open mysql: %w", err)
 	}

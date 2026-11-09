@@ -16,13 +16,13 @@ func TestDBConfig_MySQLDSN(t *testing.T) {
 			name:     "standard connection",
 			cfg:      DBConfig{Host: "localhost", Port: 3306, User: "root", Pass: "secret"},
 			database: "testdb",
-			want:     "root:secret@tcp(localhost:3306)/testdb?charset=utf8mb4&parseTime=true&loc=UTC",
+			want:     "root:secret@tcp(localhost:3306)/testdb?charset=utf8mb4&parseTime=true&loc=UTC&time_zone=%27%2B00%3A00%27",
 		},
 		{
 			name:     "empty password",
 			cfg:      DBConfig{Host: "10.0.0.1", Port: 4000, User: "admin", Pass: ""},
 			database: "mydb",
-			want:     "admin:@tcp(10.0.0.1:4000)/mydb?charset=utf8mb4&parseTime=true&loc=UTC",
+			want:     "admin:@tcp(10.0.0.1:4000)/mydb?charset=utf8mb4&parseTime=true&loc=UTC&time_zone=%27%2B00%3A00%27",
 		},
 	}
 
@@ -33,14 +33,6 @@ func TestDBConfig_MySQLDSN(t *testing.T) {
 				t.Errorf("MySQLDSN() = %q, want %q", got, tt.want)
 			}
 		})
-	}
-}
-
-func TestDBConfig_MySQLUTCDSN(t *testing.T) {
-	cfg := DBConfig{Host: "localhost", Port: 3306, User: "root", Pass: "secret"}
-	want := "root:secret@tcp(localhost:3306)/testdb?charset=utf8mb4&parseTime=true&loc=UTC&time_zone=%27%2B00%3A00%27"
-	if got := cfg.MySQLUTCDSN("testdb"); got != want {
-		t.Errorf("MySQLUTCDSN() = %q, want %q", got, want)
 	}
 }
 

@@ -48,17 +48,13 @@ type DBConfig struct {
 	SSLMode string // PostgreSQL only; defaults to "disable" if empty
 }
 
-// MySQLDSN returns a go-sql-driver/mysql compatible DSN.
+// MySQLDSN returns a go-sql-driver/mysql compatible DSN. The session time zone
+// is fixed to UTC because loc=UTC only tells the driver how to label what it
+// reads: the server still renders TIMESTAMP and evaluates
+// UNIX_TIMESTAMP(DATETIME) in the session zone.
 func (c DBConfig) MySQLDSN(database string) string {
-	return fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=true&loc=UTC",
+	return fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=true&loc=UTC&time_zone=%%27%%2B00%%3A00%%27",
 		c.User, c.Pass, c.Host, c.Port, database)
-}
-
-// MySQLUTCDSN is MySQLDSN with the session time zone fixed to UTC. loc=UTC only
-// tells the driver how to label what it reads; the server still renders
-// TIMESTAMP and evaluates UNIX_TIMESTAMP(DATETIME) in the session zone.
-func (c DBConfig) MySQLUTCDSN(database string) string {
-	return c.MySQLDSN(database) + "&time_zone=%27%2B00%3A00%27"
 }
 
 // PostgresDSN returns a pgx compatible connection string.
