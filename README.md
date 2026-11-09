@@ -1,31 +1,59 @@
 # dbshift
 
-MySQL 到 PostgreSQL 的資料遷移工具。支援多資料庫批次遷移、並行表遷移，以及遷移後的資料驗證。
+把 MySQL 的資料搬到 PostgreSQL，搬完自動核對兩邊是否一致。給要換資料庫、需要知道「搬完有沒有少資料」的人：對不上時，報告會指出是哪張表、哪個欄位，能定位時連差異的資料列也列出來。
 
-## 功能
+dbshift 只搬資料，表結構要先在 PostgreSQL 建好。
 
-- **多資料庫支援**：一次遷移多個資料庫
-- **並行表遷移**：可設定 worker 數量，同時遷移多張表
-- **批次 COPY**：使用 PostgreSQL COPY 協定高效寫入
-- **型別轉換**：自動處理 MySQL 與 PostgreSQL 之間的型別差異（BLOB、BIT、JSON、DECIMAL、TINYINT→boolean、TIME→time 等）
-- **一次清空目標表**：worker 開始前用一條 TRUNCATE 清空所有目標表，不用 CASCADE，較晚遷移的父表不會清掉已寫好的子表
-- **Trigger 管理**：遷移期間自動停用/啟用外鍵與觸發器
-- **欄位自動跳過**：來源存在但目標已移除的廢棄欄位會自動跳過並記錄警告，不中斷遷移
-- **交易原子性**：每張表的 COPY、序列重設在同一筆交易中完成
-- **Sequence 重設**：遷移後自動修正 PostgreSQL 序列值
-- **資料驗證**：比對行數、數值 SUM、文字長度 SUM、日期範圍（MIN/MAX）checksum，確保資料完整性
-- **差異診斷**：Checksum 不符時自動 drill-down，顯示不符的欄位與實際差異資料列（可用 `--diagnose-limit` 控制顯示筆數）
-- **並行驗證**：驗證階段同樣支援多表並行，MySQL/PG 端查詢同時執行
-- **優雅中斷**：支援 Ctrl+C 中斷
+## 用起來長這樣
 
-## 前提
+一行指令，搬完直接驗證：
 
-- MySQL 中的資料庫與表結構須已在 PostgreSQL 中建立（本工具僅遷移資料，不遷移 schema）
-- 僅遷移兩端都存在的表（來源有但目標沒有的欄位會自動跳過並發出警告）
-- 目標端若有遷移範圍以外的表用外鍵參照被遷移的表，遷移會在清空前報錯停止，資料不會變動
-- 遷移會先清空所有目標表；中途失敗時目標可能只有部分資料，重跑一次即可
+```console
+$ dbshift migrate --databases shop --log-level warn
+time=2026-11-09T08:33:07.700Z level=WARN msg=來源欄位在目標不存在，略過 table=orders column=legacy_flag
 
-## 安裝
+--- shop→shop ---
+
+TABLE                                       M_COUNT    P_COUNT     CHECKSUM STATUS
+-----                                       -------    -------     -------- ------
+customers                                      1000       1000        MATCH OK
+orders                                         5000       5000        MATCH OK
+
+shop→shop verification passed
+```
+
+`legacy_flag` 是來源有、目標已經沒有的舊欄位，dbshift 跳過它並留一行警告，不中斷遷移。
+
+之後目標端的資料如果被動過，`dbshift verify` 會指出差在哪裡。這裡手動把 `orders` 裡 `id=42` 那一列的金額減 100，再驗證一次：
+
+```console
+$ dbshift verify --databases shop
+
+--- shop→shop ---
+
+TABLE                                       M_COUNT    P_COUNT     CHECKSUM STATUS
+-----                                       -------    -------     -------- ------
+customers                                      1000       1000        MATCH OK
+orders                                         5000       5000     MISMATCH CHECKSUM_MISMATCH
+
+  Mismatching columns:
+  COLUMN                         TYPE                      MYSQL                   PG
+  amount_cents                   numeric                 2648000              2647900
+
+  Sample differing rows (up to 10):
+    PK(id=42)  col=amount_cents  mysql=142  pg=42
+
+
+WARNING: shop→shop has data mismatches
+```
+
+發現不一致時程式以 exit code 1 結束，腳本可以據此判斷。
+
+<sub>以上是實際執行的輸出。環境是容器裡的 MySQL 8.4 與 PostgreSQL 18，資料是虛構的（customers 1,000 列、orders 5,000 列），連線設定用環境變數帶入。不一致時，程式後面還會印一行 `Error: verification found mismatches` 和指令用法，這裡省略。</sub>
+
+## 快速開始
+
+需要 Go 1.25 以上。
 
 ```bash
 go install github.com/miskawu/dbshift@latest
@@ -38,6 +66,62 @@ git clone https://github.com/MiskaWu/dbshift.git
 cd dbshift
 go build -o dbshift .
 ```
+
+動手前要知道：
+
+- MySQL 中的資料庫與表結構須已在 PostgreSQL 中建立（本工具僅遷移資料，不遷移 schema）
+- 僅遷移兩端都存在的表（來源有但目標沒有的欄位會自動跳過並發出警告）
+- 目標端若有遷移範圍以外的表用外鍵參照被遷移的表，遷移會在清空前報錯停止，資料不會變動
+- **遷移會先清空所有目標表**；中途失敗時目標可能只有部分資料，重跑一次即可
+
+然後指定要搬的資料庫。密碼走環境變數，寫在 `--mysql-pass`、`--pg-pass` 的話，同一台機器上用 `ps` 就看得到：
+
+```bash
+read -rs MYSQL_PASS && export MYSQL_PASS
+read -rs PG_PASS && export PG_PASS
+
+dbshift migrate --databases mydb --mysql-host 10.0.0.1 --pg-host 10.0.0.2
+```
+
+只想核對、不想動資料，把 `migrate` 換成 `verify`。
+
+## 驗證抓得到什麼
+
+驗證比的是聚合值：列數、整數欄的 SUM、文字欄的字元長度總和、日期欄的 MIN／MAX。聚合值對不上時，才往下逐欄比，再用主鍵（沒有主鍵就用第一個 unique key）逐列找出實際的差異。所以它能很快發現少資料和數值、長度上的落差，但不等於把每一列都比過。
+
+| 目標端的狀況 | 驗證結果 |
+|---|---|
+| 少了或多了列 | `COUNT_MISMATCH`，列出不符的欄位與差異的列 |
+| 整數欄的值變了，總和也跟著變 | `CHECKSUM_MISMATCH`，列出不符的欄位與差異的列 |
+| 文字長度變了 | `CHECKSUM_MISMATCH`，列出不符的欄位與差異的列 |
+| 日期欄的最早或最晚值變了 | `CHECKSUM_MISMATCH`，列出不符的欄位，但**列不出差異的列**（見下方） |
+| 日期欄中間的值變了，最早與最晚不變 | **抓不到**，報告為 `OK` |
+| 文字內容變了，但長度相同 | **抓不到**，報告為 `OK` |
+| 兩列的整數互換，總和不變 | **抓不到**，報告為 `OK` |
+| `DECIMAL`、`FLOAT`、`DOUBLE`、`JSON`、`BLOB`、`ENUM`、`TIME` 等欄位的值變了 | **抓不到**，這些型別不納入比對 |
+| 表沒有主鍵也沒有 unique key | 只列出不符的欄位，不列差異的列 |
+
+納入比對的型別：整數是 `int`、`bigint`、`smallint`、`mediumint`、`tinyint`；文字是 `varchar`、`char`、`text`、`tinytext`、`mediumtext`、`longtext`；日期是 `date`、`datetime`、`timestamp`。
+
+目前的限制：不符的欄位裡只要有日期欄（PostgreSQL 的 `date`、`timestamp`、`timestamptz`），逐列比對就會失敗，只留下一行 `逐行差異比對失敗` 的警告，那張表的差異列都列不出來，不符的欄位仍會列出。
+
+逐列比對會把該表的主鍵與不符欄位整張讀進記憶體，表很大時可以用 `--skip-diagnosis` 跳過。
+
+## 功能
+
+- **多資料庫支援**：一次遷移多個資料庫
+- **並行表遷移**：可設定 worker 數量，同時遷移多張表
+- **批次 COPY**：使用 PostgreSQL COPY 協定高效寫入
+- **型別轉換**：自動處理 MySQL 與 PostgreSQL 之間的型別差異（BLOB、BIT、JSON、DECIMAL、TINYINT→boolean、TIME→time 等）
+- **一次清空目標表**：worker 開始前用一條 TRUNCATE 清空所有目標表，不用 CASCADE，較晚遷移的父表不會清掉已寫好的子表
+- **Trigger 管理**：遷移期間自動停用/啟用外鍵與觸發器
+- **欄位自動跳過**：來源存在但目標已移除的廢棄欄位會自動跳過並記錄警告，不中斷遷移
+- **交易原子性**：每張表的 COPY、序列重設在同一筆交易中完成
+- **Sequence 重設**：遷移後自動修正 PostgreSQL 序列值
+- **資料驗證**：比對行數、整數 SUM、文字長度 SUM、日期範圍（MIN/MAX）checksum，範圍見[驗證抓得到什麼](#驗證抓得到什麼)
+- **差異診斷**：Checksum 不符時自動 drill-down，顯示不符的欄位與實際差異資料列（可用 `--diagnose-limit` 控制顯示筆數）
+- **並行驗證**：驗證階段同樣支援多表並行，MySQL/PG 端查詢同時執行
+- **優雅中斷**：支援 Ctrl+C 中斷
 
 ## 使用方式
 
@@ -120,30 +204,15 @@ dbshift migrate \
    - 比對來源與目標欄位，跳過目標不存在的廢棄欄位（warn 記錄）
    - 開始交易：串流讀取並批次 COPY → 重設序列值 → 提交
    - 啟用觸發器
-5. 執行驗證（並行）：比對行數、數值 SUM、文字長度 SUM、日期 MIN/MAX
+5. 執行驗證（並行）：比對行數、整數 SUM、文字長度 SUM、日期 MIN/MAX
 
 ## 驗證報告
 
-遷移完成後（或使用 `dbshift verify`）會輸出驗證報告：
+遷移完成後（或使用 `dbshift verify`）會輸出驗證報告，實際的樣子見[用起來長這樣](#用起來長這樣)。各欄的意思：
 
-```
---- mydb ---
-
-TABLE                                       M_COUNT    P_COUNT     CHECKSUM STATUS
------                                       -------    -------     -------- ------
-users                                           100        100        MATCH OK
-orders                                           50         48          n/a COUNT_MISMATCH
-scores                                           15         15     MISMATCH CHECKSUM_MISMATCH
-
-  Mismatching columns:
-  COLUMN                         TYPE             MYSQL                   PG
-  score                          numeric          48250                48249
-
-  Sample differing rows (up to 10):
-    PK(id=42)  col=score  mysql=95  pg=94
-
-WARNING: mydb has data mismatches
-```
+- `M_COUNT`、`P_COUNT`：MySQL 與 PostgreSQL 的行數。
+- `CHECKSUM`：聚合值比對的結果，`MATCH` 或 `MISMATCH`；表裡沒有可比對的欄位時是 `n/a`。
+- `STATUS`：`OK`、`COUNT_MISMATCH`、`CHECKSUM_MISMATCH`；該表查詢失敗時是 `ERROR`。
 
 Checksum 不符時會自動顯示不符的欄位及差異資料列。可用 `--skip-diagnosis` 關閉，或用 `--diagnose-limit N` 調整顯示筆數。
 
