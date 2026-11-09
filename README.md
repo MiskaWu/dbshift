@@ -94,7 +94,7 @@ dbshift migrate --databases mydb --mysql-host 10.0.0.1 --pg-host 10.0.0.2
 | 少了或多了列 | `COUNT_MISMATCH`，列出不符的欄位與差異的列 |
 | 整數欄的值變了，總和也跟著變 | `CHECKSUM_MISMATCH`，列出不符的欄位與差異的列 |
 | 文字長度變了 | `CHECKSUM_MISMATCH`，列出不符的欄位與差異的列 |
-| 日期欄的最早或最晚值變了 | `CHECKSUM_MISMATCH`，列出不符的欄位，但**列不出差異的列**（見下方） |
+| 日期欄的最早或最晚值變了 | `CHECKSUM_MISMATCH`，列出不符的欄位與差異的列 |
 | 日期欄中間的值變了，最早與最晚不變 | **抓不到**，報告為 `OK` |
 | 文字內容變了，但長度相同 | **抓不到**，報告為 `OK` |
 | 兩列的整數互換，總和不變 | **抓不到**，報告為 `OK` |
@@ -103,7 +103,7 @@ dbshift migrate --databases mydb --mysql-host 10.0.0.1 --pg-host 10.0.0.2
 
 納入比對的型別：整數是 `int`、`bigint`、`smallint`、`mediumint`、`tinyint`；文字是 `varchar`、`char`、`text`、`tinytext`、`mediumtext`、`longtext`；日期是 `date`、`datetime`、`timestamp`。
 
-目前的限制：不符的欄位裡只要有日期欄（PostgreSQL 的 `date`、`timestamp`、`timestamptz`），逐列比對就會失敗，只留下一行 `逐行差異比對失敗` 的警告，那張表的差異列都列不出來，不符的欄位仍會列出。
+差異的列裡，日期一律換算成 UTC 顯示，例如 `2024-03-09T10:20:30.12Z`，小數秒結尾的 0 會省略。
 
 逐列比對會把該表的主鍵與不符欄位整張讀進記憶體，表很大時可以用 `--skip-diagnosis` 跳過。
 
